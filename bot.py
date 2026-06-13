@@ -1,49 +1,75 @@
 import os
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.request import HTTPXRequest
+import requests
+from flask import Flask, request
 from groq import Groq
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
+app = Flask(__name__)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Merhaba! Ben senin 7/24 çalışan bulut asistanınım. Bana her şeyi sorabilirsin.")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    user_id = update.message.from_user.id
-    
-    await context.bot.send_chat_action(chat_id=user_id, action="typing")
-
+def send_message(chat_id, text):
+    url = f"{TELEGRAM_API_URL}/sendMessage"
+    data = {"chat_id": chat_id, "text": text}
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": user_message}],
-            model="llama3-8b-8192",
-            temperature=0.7
-        )
-        ai_response = chat_completion.choices[0].message.content
-        await update.message.reply_text(ai_response)
-        
+        resp = requests.post(url, data=data, timeout=30)
+        if resp.status_code != 200:
+            logging.error(f"Telegram API Hatası: {resp.text}")
     except Exception as e:
-        logging.error(f"Hata: {e}")
-        await update.message.reply_text("Şu an AI beynimle iletişim kuramıyorum. Lütfen biraz sonra tekrar dene.")
+        logging.error(f"Mesaj gönderme hatası: {e}")
 
-def main():
-    # Ağ bağlantısı için daha esnek ve dayanıklı ayarlar
-    request = HTTPXRequest(connection_pool_size=8, connect_timeout=30.0, read_timeout=30.0)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = request.get_json()
     
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
+    if 'message' in update:
+        chat_id = update['message']['chat']['id']
+        user_message = update['message'].get('text', '')
+        
+        if user_message == '/start':
+            send_message(chat_id, "Merhaba! Ben senin 7/24 çalışan bulut asistanınım. Bana her şeyi sorabilirsin.")
+        else:
+            try:
+                chat_completion = client.chat.completions.create(
+                    messages=[{"role": "user", "content": user_message}],
+                    model="llama3-8b-8192",
+                    temperature=0.7
+                )
+                ai_response = chat_completion.choices[0].message.content
+                send_message(chat_id, ai_response)
+            except Exception as e:
+                logging.error(f"AI Hatası: {e}")
+                send_message(chat_id, "Şu an AI beynimle iletişim kuramıyorum. Lütfen biraz sonra tekrar dene.")
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("Bot başlatıldı, 7/24 dinlemede...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    return '', 200
+
+@app.route('/')
+def home():
+    return "Bot is running!", 200
 
 if __name__ == "__main__":
-    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-    main()
+    logging.basicConfig(level=logging.INFO)
+    port = int(os.environ.get("PORT", 10000))
+    
+    # Render'da webhook URL'sini otomatik al
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if render_url:
+        webhook_url = f"{render_url}/webhook"
+        try:
+            resp = requests.post(
+                f"{TELEGRAM_API_URL}/setWebhook", 
+                data={"url": webhook_url}, 
+                timeout=30
+            )
+            if resp.status_code == 200:
+                print(f"✅ Webhook başarıyla ayarlandı: {webhook_url}")
+            else:
+                print(f"❌ Webhook ayarlama hatası: {resp.text}")
+        except Exception as e:
+            logging.error(f"Webhook ayarlama hatası: {e}")
+    
+    app.run(host='0.0.0.0', port=port)
